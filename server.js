@@ -37,4 +37,5 @@ app.post("/chat", async (req, res) => {
   }
 });
 
-app.listen(3001, () => console.log("后端跑起来了，端口3001"));
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => console.log("后端跑起来了，端口" + PORT));
