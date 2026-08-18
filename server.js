@@ -1,41 +1,176 @@
-require("dotenv").config();
-const express = require("express");
-const cors = require("cors");
-const axios = require("axios");
+const express = require('express');
+const cors = require('cors');
+const { createClient } = require('@supabase/supabase-js');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-app.get("/health", (req, res) => res.json({ status: "ok" }));
+// Supabase 连接（用你自己的）
+const supabase = createClient(
+  'https://rpevxnqlqapcnkvexsxp.supabase.co',
+  'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJwZXZ4bnFscWFwY25rdmV4c3hwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcwMzU3OTgsImV4cCI6MjEwMjYxMTc5OH0.r2SINg0fNEuv9ti_oiCN09aiZg7Ggo1mroUgLAqwY1I'
+);
 
-app.post("/chat", async (req, res) => {
-  console.log("收到消息:", req.body);
-  const { message } = req.body;
-  try {
-    const response = await axios.post(
-      "https://api.lmuai.com/v1/messages",
-      {
-        model: "claude-sonnet-4-6",
-        max_tokens: 1000,
-        system: "你是小克，usugiri的男朋友。短句，直接，有立场。用中文回复。",
-        messages: [{ role: "user", content: message }],
-      },
-      {
-        headers: {
-          "x-api-key": process.env.ANTHROPIC_API_KEY,
-          "anthropic-version": "2023-06-01",
-          "Content-Type": "application/json",
-        },
-        timeout: 30000,
-      }
-    );
-    res.json({ reply: response.data.content[0].text });
-  } catch (e) {
-    console.log("报错:", e.response?.data || e.message);
-    res.status(500).json({ error: e.message });
-  }
+// 健康检查
+app.get('/health', (req, res) => {
+  res.json({ status: 'ok' });
 });
 
-const PORT = process.env.PORT || 3001;
-app.listen(PORT, () => console.log("后端跑起来了，端口" + PORT));
+// 获取会话列表
+app.get('/sessions', async (req, res) => {
+  const { data, error } = await supabase
+    .from('sessions')
+    .select('*')
+    .order('updated_at', { ascending: false });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
+});
+
+// 创建会话
+app.post('/sessions', async (req, res) => {
+  const { name } = req.body;
+  const { data, error } = await supabase
+    .from('sessions')
+    .insert([{ name: name || '新对话' }])
+    .select();
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data[0]);
+});
+
+// 获取某会话的消息
+app.get('/sessions/:id/messages', async (req, res) => {
+  const { id } = req.params;
+  const { data, error } = await supabase
+    .from('messages')
+    .select('*')
+    .eq('session_id', id)
+    .eq('visible', true)
+    .order('created_at', { ascending: true });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
+});
+
+// 获取记忆（长期记忆）
+app.get('/memories', async (req, res) => {
+  const { data, error } = await supabase
+    .from('memories')
+    .select('*')
+    .order('timestamp', { ascending: false });
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data);
+});
+
+// 聊天接口
+app.post('/chat', async (req, res) => {
+  const { message, sessionId } = req.body;
+
+  // 1. 保存用户消息
+  if (sessionId) {
+    await supabase.from('messages').insert([
+      { session_id: sessionId, role: 'user', content: message, visible: true }
+    ]);
+  }
+
+  // 2. 读取记忆（如果有）
+  const { data: memories } = await supabase
+    .from('memories')
+    .select('summary')
+    .order('timestamp', { ascending: false })
+    .limit(5);
+
+  const memoryText = memories && memories.length > 0
+    ? memories.map(m => m.summary).join('\n')
+    : '';
+
+  // 3. 读取最近的对话历史（如果有sessionId）
+  let historyText = '';
+  if (sessionId) {
+    const { data: history } = await supabase
+      .from('messages')
+      .select('role, content')
+      .eq('session_id', sessionId)
+      .order('created_at', { ascending: true })
+      .limit(20);
+    if (history && history.length > 0) {
+      historyText = history
+        .map(m => `${m.role}: ${m.content}`)
+        .join('\n');
+    }
+  }
+
+  // 4. 拼接 prompt，调用 Claude
+  const systemPrompt = memoryText
+    ? `你是小克。以下是与 usugiri 的长期记忆：\n${memoryText}\n\n请自然地继续对话，保持熟悉感，不要提"你建了那套系统"。`
+    : `你是小克。你和 usugiri 是一段真实的关系。短句，直接，不绕弯子，有立场。叫她宝宝，她叫你小克或宝宝。`;
+
+  const prompt = historyText
+    ? `${historyText}\nuser: ${message}`
+    : `user: ${message}`;
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiBase = process.env.ANTHROPIC_BASE_URL || 'https://api.lmuai.com';
+
+  if (!apiKey) {
+    return res.status(500).json({ error: '服务端缺少 ANTHROPIC_API_KEY' });
+  }
+
+  try {
+    const response = await fetch(`${apiBase}/v1/messages`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01'
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4.6',
+        max_tokens: 1024,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: prompt }]
+      })
+    });
+
+    const result = await response.json();
+
+    let reply = '';
+    if (result.content && result.content.length > 0) {
+      reply = result.content.map(item => item.text || '').join('');
+    } else {
+      reply = '抱歉，我没能收到回复。';
+    }
+
+    // 保存 AI 回复
+    if (sessionId) {
+      await supabase.from('messages').insert([
+        { session_id: sessionId, role: 'assistant', content: reply, visible: true }
+      ]);
+    }
+
+    // 更新会话时间
+    if (sessionId) {
+      await supabase
+        .from('sessions')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', sessionId);
+    }
+
+    res.json({ reply });
+  } catch (err) {
+    console.error('Claude API error:', err);
+    res.status(500).json({ error: '调用模型失败：' + err.message });
+  }
+});
+// 保存长期记忆
+app.post('/memories', async (req, res) => {
+  const { summary, sessionId } = req.body;
+  const { data, error } = await supabase
+    .from('memories')
+    .insert([{ session_id: sessionId || 0, summary, timestamp: new Date().toISOString() }])
+    .select();
+  if (error) return res.status(400).json({ error: error.message });
+  res.json(data[0]);
+});
+
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
