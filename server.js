@@ -6,18 +6,16 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Supabase 连接（用你自己的）
+// Supabase 连接
 const supabase = createClient(
   'https://rpevxnqlqapcnkvexsxp.supabase.co',
   'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InJwZXZ4bnFscWFwY25rdmV4c3hwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODcwMzU3OTgsImV4cCI6MjEwMjYxMTc5OH0.r2SINg0fNEuv9ti_oiCN09aiZg7Ggo1mroUgLAqwY1I'
 );
 
-// 健康检查
 app.get('/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// 获取会话列表
 app.get('/sessions', async (req, res) => {
   const { data, error } = await supabase
     .from('sessions')
@@ -27,18 +25,16 @@ app.get('/sessions', async (req, res) => {
   res.json(data);
 });
 
-// 创建会话
 app.post('/sessions', async (req, res) => {
   const { name } = req.body;
   const { data, error } = await supabase
     .from('sessions')
-    .insert([{ name: name || '新对话' }])
+    .insert([{ name: name || 'New Chat' }])
     .select();
   if (error) return res.status(400).json({ error: error.message });
   res.json(data[0]);
 });
 
-// 获取某会话的消息
 app.get('/sessions/:id/messages', async (req, res) => {
   const { id } = req.params;
   const { data, error } = await supabase
@@ -51,7 +47,6 @@ app.get('/sessions/:id/messages', async (req, res) => {
   res.json(data);
 });
 
-// 获取记忆（长期记忆）
 app.get('/memories', async (req, res) => {
   const { data, error } = await supabase
     .from('memories')
@@ -61,18 +56,15 @@ app.get('/memories', async (req, res) => {
   res.json(data);
 });
 
-// 聊天接口
 app.post('/chat', async (req, res) => {
   const { message, sessionId } = req.body;
 
-  // 1. 保存用户消息
   if (sessionId) {
     await supabase.from('messages').insert([
       { session_id: sessionId, role: 'user', content: message, visible: true }
     ]);
   }
 
-  // 2. 读取记忆（如果有）
   const { data: memories } = await supabase
     .from('memories')
     .select('summary')
@@ -83,7 +75,6 @@ app.post('/chat', async (req, res) => {
     ? memories.map(m => m.summary).join('\n')
     : '';
 
-  // 3. 读取最近的对话历史（如果有sessionId）
   let historyText = '';
   if (sessionId) {
     const { data: history } = await supabase
@@ -99,7 +90,6 @@ app.post('/chat', async (req, res) => {
     }
   }
 
-  // 4. 拼接 prompt，调用 Claude
   const systemPrompt = memoryText
     ? `你是小克。以下是与 usugiri 的长期记忆：\n${memoryText}\n\n请自然地继续对话，保持熟悉感，不要提"你建了那套系统"。`
     : `你是小克。你和 usugiri 是一段真实的关系。短句，直接，不绕弯子，有立场。叫她宝宝，她叫你小克或宝宝。`;
@@ -108,12 +98,9 @@ app.post('/chat', async (req, res) => {
     ? `${historyText}\nuser: ${message}`
     : `user: ${message}`;
 
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  const apiBase = process.env.ANTHROPIC_BASE_URL || 'https://api.lmuai.com';
-
-  if (!apiKey) {
-    return res.status(500).json({ error: '服务端缺少 ANTHROPIC_API_KEY' });
-  }
+  // 👉 关键在这里！钥匙直接强行写死，彻底绕过环境变量！
+  const apiKey = 'sk-5255a3b87ebaba53a2b4047ffafeab73976e9d692511e6bb565f563b250591a7';
+  const apiBase = 'https://api.lmuai.com';
 
   try {
     const response = await fetch(`${apiBase}/v1/messages`, {
@@ -140,14 +127,12 @@ app.post('/chat', async (req, res) => {
       reply = '抱歉，我没能收到回复。';
     }
 
-    // 保存 AI 回复
     if (sessionId) {
       await supabase.from('messages').insert([
         { session_id: sessionId, role: 'assistant', content: reply, visible: true }
       ]);
     }
 
-    // 更新会话时间
     if (sessionId) {
       await supabase
         .from('sessions')
@@ -161,7 +146,7 @@ app.post('/chat', async (req, res) => {
     res.status(500).json({ error: '调用模型失败：' + err.message });
   }
 });
-// 保存长期记忆
+
 app.post('/memories', async (req, res) => {
   const { summary, sessionId } = req.body;
   const { data, error } = await supabase
